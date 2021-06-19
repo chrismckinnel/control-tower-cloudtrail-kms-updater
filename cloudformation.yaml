@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  LogArchiveAccountId:
+    Type: String
+    Description: Log Archive Account ID
+    AllowedPattern: '^[0-9]{12}$'
+    ConstraintDescription: The Security Account ID must be a 12 character string.
+    MinLength: 12
+    MaxLength: 12 
+  CloudTrailName:
+    Type: String
+    Description: The name of the CloudTrail trail to update with the KMS key
+  CloudTrailLambdaS3Bucket:
+    Type: String
+    Description: The name of the S3 bucket where the CloudTrail update lambda lives
+  CloudTrailLambdaZipFile:
+    Type: String
+    Description: The name of the CloudTrail update lambda zip file
+  
+Resources:
+
+  NewManagedAccountEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: 'ControlTower_Rule_CreateManagedAccount'
+      Name: !Sub 'ControlTower-Rule-On-CreateManagedAccount-Update-CloudTrail'
+      EventPattern:
+        source:
+          - "aws.controltower"
+        detail-type:
+          - "AWS Service Event via CloudTrail"
+        detail:
+          eventSource:
+            - "controltower.amazonaws.com"
+          eventName:
+            - "CreateManagedAccount"
+          serviceEventDetails:
+            createManagedAccountStatus:
+              state:
+                - "SUCCEEDED"
+      State: "ENABLED"
+      Targets:
+        -
+          Id: "CloudTrail-Update-NotificationEvent"
+          Arn: !GetAtt CloudTrailUpdateLambda.Arn
+
+  CloudTrailUpdateLambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: cloudtrail-update-lambda
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'lambda.amazonaws.com'
+          Action: 'sts:AssumeRole'
+            
+  CloudTrailUpdateLambdaPolicy:
+    Type: 'AWS::IAM::Policy'
+    Properties:
+      Roles:
+      - !Ref CloudTrailUpdateLambdaRole
+      PolicyName: cloud-trail-update-lambda-policy
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Action:
+          - 'logs:CreateLogStream'
+          - 'logs:PutLogEvents'
+          Resource: !GetAtt 'CloudTrailUpdateLambdaLogGroup.Arn'
+        - Effect: Allow
+          Action:
+          - 'cloudtrail:UpdateTrail'
+          Resource: !Sub arn:aws:cloudtrail:*:${LogArchiveAccountId}:trail/*
+        - Effect: Allow
+          Action:
+          - 'ssm:GetParameter'
+          Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/cloudtrail/kms-key-id
+        - Effect: "Allow"
+          Action:
+            - "sts:AssumeRole"
+          Resource: "arn:aws:iam::*:role/AWSControlTowerExecution"
+          
+  CloudTrailUpdateLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt NewManagedAccountEvent.Arn
+      FunctionName: !GetAtt CloudTrailUpdateLambda.Arn
+      
+  CloudTrailUpdateLambdaLogGroup:
+    Type: 'AWS::Logs::LogGroup'
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${CloudTrailUpdateLambda}'
+         
+  CloudTrailUpdateLambda:
+    Type: 'AWS::Lambda::Function'
+    Properties:
+      Code:
+        S3Bucket: !Ref CloudTrailLambdaS3Bucket
+        S3Key: !Ref CloudTrailLambdaZipFile
+      Handler: 'cloudtrail_updater.handler'
+      MemorySize: 128
+      Role: !GetAtt 'CloudTrailUpdateLambdaRole.Arn'
+      Runtime: 'python3.8'
+      Timeout: 60
